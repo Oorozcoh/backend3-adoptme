@@ -1,20 +1,39 @@
 import { Router } from 'express';
-import { generateUser, generatePets, generateUsers } from '../mocks/mocking.module.js';
-import { usersService, petsService } from '../services/index.js';
 import compression from 'compression';
+import {
+  generateUser,
+  generatePets,
+  generateUsers,
+  parseQuantity,
+  DEFAULT_QUANTITY,
+} from '../mocks/mocking.module.js';
+import { usersService, petsService } from '../services/index.js';
+import CustomError from '../errors/CustomError.js';
+import ErrorsEnum from '../errors/enum.js';
 
 const router = Router();
 
-router.get('/mockingpets', compression(), async (req, res) => {
-  const { quantity } = req.query;
-  const pets = generatePets(Number(quantity));
-  res.send({ status: 'success', payload: pets });
+// ?quantity opcional: si no viene, se usa el valor por defecto (50).
+const getQueryQuantity = (query) =>
+  query.quantity === undefined ? DEFAULT_QUANTITY : parseQuantity(query.quantity);
+
+router.get('/mockingpets', compression(), async (req, res, next) => {
+  try {
+    const pets = generatePets(getQueryQuantity(req.query));
+    res.send({ status: 'success', payload: pets });
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/mockingusers', compression(), async (req, res) => {
-  const { quantity } = req.query;
-  const users = generateUsers(Number(quantity));
-  res.send({ status: 'success', payload: users });
+// Solo genera y devuelve usuarios (no los persiste).
+router.get('/mockingusers', compression(), async (req, res, next) => {
+  try {
+    const users = await generateUsers(getQueryQuantity(req.query));
+    res.send({ status: 'success', payload: users });
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get('/mock-user', async (req, res) => {
@@ -22,20 +41,41 @@ router.get('/mock-user', async (req, res) => {
   res.json({ status: 'success', user });
 });
 
-router.post('/generate-data', async (req, res) => {
-  const { usersQuantity, petsQuantity } = req.body;
+// Body: { "users": <entero>, "pets": <entero> }. Ambos obligatorios; 0 es válido.
+// Inserta en MongoDB a través de los services existentes (Model.create acepta arrays).
+router.post('/generateData', async (req, res, next) => {
+  try {
+    const { users, pets } = req.body ?? {};
+    const usersQuantity = parseQuantity(users, 'users');
+    const petsQuantity = parseQuantity(pets, 'pets');
 
-  // Validar la cantidad valida de usuarios y mascotas
+    // Se genera todo antes de tocar la DB: si algo falla acá no se inserta nada.
+    const generatedUsers = await generateUsers(usersQuantity);
+    const generatedPets = generatePets(petsQuantity);
 
-  const generatedUsers = generateUsers(usersQuantity);
-  const generatedPets = generatePets(petsQuantity);
+    let createdUsers = [];
+    let createdPets = [];
+    try {
+      if (usersQuantity > 0) createdUsers = await usersService.create(generatedUsers);
+      if (petsQuantity > 0) createdPets = await petsService.create(generatedPets);
+    } catch (error) {
+      throw CustomError.createError({
+        name: 'MockDataPersistenceError',
+        cause: error.message,
+        message: 'Error inserting generated data',
+        code: ErrorsEnum.DATABASE_ERROR,
+      });
+    }
 
-  console.log('Generated Users:', generatedUsers);
-
-  const createdUsers = await Promise.all(generatedUsers.map((user) => usersService.create(user)));
-  const createdPets = await Promise.all(generatedPets.map((pet) => petsService.create(pet)));
-
-  res.json({ status: 'success', users: createdUsers, pets: createdPets });
+    res.status(201).send({
+      status: 'success',
+      message: 'Data generated successfully',
+      users: createdUsers.length,
+      pets: createdPets.length,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 export default router;
